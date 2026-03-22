@@ -1,0 +1,28 @@
+[Unit]
+Description=Claude Code Telegram Channel
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=nickelsilver
+Group=nickelsilver
+WorkingDirectory=/home/nickelsilver
+ExecStart=/home/nickelsilver/.local/bin/claude-telegram-daemon
+Restart=always
+RestartSec=15
+Environment=HOME=/home/nickelsilver
+Environment=PATH=/home/nickelsilver/.local/bin:/home/nickelsilver/.bun/bin:/usr/local/bin:/usr/bin:/bin
+KillMode=control-group
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+# Protect daemon from OOM killer — prefer killing interactive sessions
+OOMScoreAdjust=-500
+# Ensure daemon gets restarted even after OOM kill
+OOMPolicy=continue
+
+[Install]
+WantedBy=multi-user.target

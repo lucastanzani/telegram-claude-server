@@ -1,0 +1,77 @@
+#!/bin/bash
+set -euo pipefail
+
+export HOME="/home/nickelsilver"
+
+# Resolve latest nvm node dynamically (no hardcoded version)
+NODE_BIN="$(ls -d "$HOME/.nvm/versions/node"/v*/bin 2>/dev/null | sort -V | tail -1 || true)"
+export PATH="${NODE_BIN:+$NODE_BIN:}$HOME/.local/bin:$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin"
+
+cd "$HOME"
+mkdir -p "$HOME/logs"
+LOG="$HOME/logs/claude-telegram.log"
+FIFO="/tmp/claude-telegram-stdin"
+WATCHER_PID=""
+
+cleanup() {
+  rm -f "$FIFO"
+  # Kill watcher subshell; systemd KillMode=control-group handles the rest
+  [ -n "$WATCHER_PID" ] && kill "$WATCHER_PID" 2>/dev/null
+  kill $(jobs -p) 2>/dev/null
+  wait 2>/dev/null
+  exit 1
+}
+trap cleanup EXIT TERM INT
+
+echo "[$(date -Iseconds)] Starting Claude Code Telegram service" >> "$LOG"
+echo "[$(date -Iseconds)] Claude: $("$HOME/.local/bin/claude" --version 2>/dev/null || echo 'not found')" >> "$LOG"
+echo "[$(date -Iseconds)] Node: $(node --version 2>/dev/null || echo 'not found'), Bun: $(bun --version 2>/dev/null || echo 'not found')" >> "$LOG"
+
+# Sync bot token from secrets to plugin env (single source of truth)
+if [ -f "$HOME/.secrets/telegram-bot-token" ]; then
+  mkdir -p "$HOME/.claude/channels/telegram"
+  printf 'TELEGRAM_BOT_TOKEN=%s\n' "$(cat "$HOME/.secrets/telegram-bot-token")" > "$HOME/.claude/channels/telegram/.env"
+  chmod 600 "$HOME/.claude/channels/telegram/.env"
+  echo "[$(date -Iseconds)] Bot token synced from secrets" >> "$LOG"
+else
+  echo "[$(date -Iseconds)] WARNING: ~/.secrets/telegram-bot-token not found" >> "$LOG"
+fi
+
+# Wait for network connectivity (API must be reachable)
+for i in $(seq 1 30); do
+  if curl -s --max-time 5 -o /dev/null https://api.anthropic.com; then
+    echo "[$(date -Iseconds)] Network ready (attempt $i)" >> "$LOG"
+    break
+  fi
+  if [ "$i" -eq 30 ]; then
+    echo "[$(date -Iseconds)] Network not available after 30 attempts, starting anyway" >> "$LOG"
+  else
+    echo "[$(date -Iseconds)] Waiting for network... (attempt $i/30)" >> "$LOG"
+    sleep 2
+  fi
+done
+
+rm -f "$FIFO"
+mkfifo "$FIFO"
+
+# Background: keep FIFO open, auto-accept interactive prompts.
+# Watches log for prompt indicators and sends Enter only when detected.
+# Avoids spamming empty submits when Claude is idle in channel mode.
+(
+  set +e +o pipefail
+  exec 3>"$FIFO"
+  tail -f -n 0 "$LOG" 2>/dev/null | while IFS= read -r line; do
+    # Detect interactive prompts: selection menus, yes/no, trust, edit confirmation
+    if printf '%s' "$line" | grep -a -q -E 'trust|Do you want|Enter to confirm|Esc to cancel'; then
+      sleep 1
+      printf "\r" >&3 2>/dev/null || break
+    fi
+  done
+  # Fallback: keep FIFO open so Claude's stdin doesn't get EOF
+  exec sleep infinity
+) &
+WATCHER_PID=$!
+
+# Foreground: run claude via script (PTY) reading from FIFO
+# When claude/script exits, this returns and cleanup triggers systemd restart
+script -a -f -c "$HOME/.local/bin/claude --channels plugin:telegram@claude-plugins-official --settings $HOME/.claude/telegram-daemon-settings.json --dangerously-skip-permissions" "$LOG" < "$FIFO" 2>>"$LOG"
