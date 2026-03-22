@@ -1,0 +1,12 @@
+{
+  "dmPolicy": "allowlist",
+  "allowFrom": [
+    "123456789"
+  ],
+  "groups": {},
+  "pending": {},
+  "ackReaction": "",
+  "replyToMode": "first",
+  "textChunkLimit": 4096,
+  "chunkMode": "newline"
+}
